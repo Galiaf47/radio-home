@@ -1,0 +1,5 @@
+avr-gcc -mmcu=attiny2313a -Os main.c -o main.o
+avr-objcopy -j .text -j .data -O ihex main.o main.hex
+avrdude -c usbasp -p t2313 -U flash:w:main.hex 
+rm main.hex
+rm main.o
