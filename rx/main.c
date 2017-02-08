@@ -157,28 +157,28 @@ void listenNrf() {
 uint8_t buffer[NRF_DATA_LENGTH];
 
 main() {
-        DDRD |= (1 << PD5);
-        DDRB = 0xFF;
+    DDRD |= (1 << PD5);
+    DDRB = 0xFF;
 
-        initMSPI();
-        initNrf();
-        
-        CE_HIGH();
-        while(1) {
-            uint8_t status = getNfrRegister(STATUS);
-            PORTB = getNfrRegister(STATUS);
+    initMSPI();
+    initNrf();
+    
+    CE_HIGH();
+    while(1) {
+        uint8_t status = getNfrRegister(STATUS);
+        PORTB = getNfrRegister(STATUS);
 
-            if (status & (1<<RX_DR)) {
-                SETBIT(PORTD, PD5);
-                _delay_ms(500);
-                CLEARBIT(PORTD, PD5);
-                _delay_ms(500);
-                getNrfReceivedData(buffer);
-                setNrfRegister(STATUS, (1<<RX_DR), 1);
-            }
+        if (status & (1<<RX_DR)) {
+            SETBIT(PORTD, PD5);
+            _delay_ms(500);
+            CLEARBIT(PORTD, PD5);
+            _delay_ms(500);
+            getNrfReceivedData(buffer);
+            setNrfRegister(STATUS, (1<<RX_DR), 1);
         }
+    }
 
-        PORTB = 0xff;
+    PORTB = 0xff;
 
     return 1;
 }
