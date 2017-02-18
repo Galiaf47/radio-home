@@ -1,27 +1,27 @@
 /**
+ * MCU = atmega8a
  * Fuse bits:
- * Low 0xe4
- * High 0xdf
+ * Low 0xe4 int
+ * Low 0xff ext
+ * High 0xd9
  * Ext 0xff
  */
 
-#define F_CPU 8000000UL
+#define F_CPU 16000000UL
 
 #include <avr/io.h>
 #include <util/delay.h>
 #include <avr/interrupt.h>
-#include "nRF24L01.h"
+#include "../lib/nRF24L01.h"
 
-#define CSN_PORT PORTA
-#define CSN_PIN PORTA1
-#define CE_PORT PORTA
-#define CE_PIN PORTA0
+#define CSN_PORT PORTB
+#define CSN_PIN PORTB2
+#define CE_PORT PORTB
+#define CE_PIN PORTB1
 
-#define BITRATE 9600
-#define BAUD ((F_CPU / (2 * BITRATE)) - 1)
-#define NRF_DATA_LENGTH 5
+#define NRF_DATA_LENGTH 32
 #define SET_REGISTER_DELAY 100
-#define NRF_LISTEN_DELAY 20
+#define FREQ_DEVIDER 10
 
 #define SETBIT(x, y) x |= (1 << y)
 #define CLEARBIT(x, y) x &= (~(1 << y))
@@ -31,36 +31,24 @@
 #define CE_LOW() CLEARBIT(CE_PORT, CE_PIN)
 #define CE_HIGH() SETBIT(CE_PORT, CE_PIN)
 
-/*
- * USART - SPI
- */
+volatile uint8_t bufferCounter = 0;
+volatile uint8_t currentBuffer = 0;
+volatile int readyBuffer = -1;
+uint8_t buffer[2][NRF_DATA_LENGTH];
+
 void initMSPI() {
-    UBRRH = 0;
-    UBRRL = 0;
-    /* Setting the XCK port pin as output, enables master mode. */
-    XCK_DDR |= (1<<XCK_BIT);
-    /* Set MSPI mode of operation and SPI data mode 0. */
-    UCSRC = (1<<UMSEL1)|(1<<UMSEL0)|(0<<UCPHA)|(0<<UCPOL);
-    /* Enable receiver and transmitter. */
-    UCSRB = (1<<RXEN)|(1<<TXEN);
-    /* Set baud rate. */
-    /* IMPORTANT: The Baud Rate must be set after the transmitter is enabled
-    */
-    UBRRH = (BAUD >> 8) & 0xff;
-    UBRRL = (BAUD & 0xff);
+    DDRB |= (1<<PB3)|(1<<PB5)|(1<<CSN_PIN)|(1<<CE_PIN);
+    SPCR = (1<<SPE)|(1<<MSTR);
 }
 
 uint8_t writeMSPI(uint8_t data) {
-    // Wait for empty transmit buffer
-    // Data Register Empty (UDRE) Flag
-    while ( !( UCSRA & (1<<UDRE)) );
-    // Put data into buffer, sends the data
-    UDR = data;
-    // Wait for data to be received
-    // Receive Complete (RXC) Flag
-    while (!(UCSRA & (1<<RXC))) {}
-    // Get and return received data from buffer
-    return UDR;
+    /* Start transmission */
+    SPDR = data;
+    /* Wait for transmission complete */
+    while(!(SPSR & (1<<SPIF)));
+
+    /* Return Data Register */
+    return SPDR;
 }
 
 void initNrfRegister(uint8_t reg) {
@@ -82,19 +70,16 @@ void getNrfReceivedData(uint8_t *data) {
     CSN_HIGH();
 }
 
-uint8_t setNrfTransmitData(uint8_t *data, uint8_t data_length) {
+void setNrfTransmitData(uint8_t *data, uint8_t data_length) {
     initNrfRegister(W_TX_PAYLOAD);
    
     uint8_t i;
-    uint8_t status;
-    for (i=0; i<data_length; i++) {
-        status = writeMSPI(data[i]);
+    for (i = 0; i < data_length; i++) {
+        writeMSPI(data[i]);
         _delay_us(SET_REGISTER_DELAY);
     }
 
     CSN_HIGH();
-
-   return status;
 }
 
 void setNrfRegister(uint8_t reg, uint8_t val, uint8_t count) {
@@ -102,8 +87,8 @@ void setNrfRegister(uint8_t reg, uint8_t val, uint8_t count) {
 
     int i;
     for(i = 0; i < count; i++) {
-            writeMSPI(val);
-            _delay_us(SET_REGISTER_DELAY);
+        writeMSPI(val);
+        _delay_us(SET_REGISTER_DELAY);
     }
 
     CSN_HIGH();
@@ -121,8 +106,6 @@ uint8_t getNfrRegister(uint8_t reg) {
 }
 
 void initNrf() {
-    //PA1 - CSN; PA0 - CE
-    DDRA |= (1 << PA1) | (1 << PA0);
     CSN_HIGH();//CSN to high to disable nrf
     CE_LOW();//CE to low to nothing to send/receive
 
@@ -162,51 +145,77 @@ void initNrf() {
     _delay_ms(100);
 }
 
-
-void listenNrf() {
-    CE_HIGH();
-    _delay_us(NRF_LISTEN_DELAY);
-    CE_LOW();
-    _delay_us(NRF_LISTEN_DELAY);
+void print(uint8_t reg) {
+    PORTD = getNfrRegister(reg);
+    _delay_ms(500);
+    PORTD = 0;
+    _delay_ms(500);
 }
 
-void print(uint8_t reg) {
-    PORTB = getNfrRegister(reg);
-    _delay_ms(500);
-    PORTB = 0;
-    _delay_ms(500);
+void initPWM() {
+    DDRB |= (1 << DDB3);
+    // (0) (1(xx)1)-Fast PWM; (01)-OC2 non-inverting mode; (001)-no prescaling
+    // TCCR2 = 0b01101001;
+    // (0) (1(xx)1)-Fast PWM; (00)-OC2 pin disconected; (001)-no prescaling
+    TCCR2 = 0b01001001;
+    
+    // Enable ovf interrupt
+    TIMSK |= (1<<TOIE2);
+}
+
+void initADC() {
+    PORTC = 0xff;
+    // ADCSRA = 0b10000101;
+    //1 ADEN - ADC enabled
+    //1 ADSC - Start conversion
+    //1 ADFR - Free running
+    //0 ADIF - interrupt flag
+    //0 ADIE - interrupt enable
+    //101 ADPS[2:0] - division factor 32
+    ADCSRA = 0b11100101;
+    ADMUX = 0b11100101;
 }
 
 main() {
-    DDRD |= (1 << PD5);
-    DDRB = 0xFF;
+    // debug output port
+    DDRD = 0xff;
 
     initMSPI();
     initNrf();
 
-    uint8_t data[NRF_DATA_LENGTH];// = {0x93,0x93,0x93,0x93,0x93};
-    int i;
-    for(i = 0; i < NRF_DATA_LENGTH; i++) {
-        data[i] = 0x93;
-    }
+    initADC();
+    initPWM();
 
-    int count = 0;
+    print(STATUS);
+
+    sei();
+
+    CE_HIGH();
     while(1) {
-        count++;
-        if (count == 500) {
-            count = 0;
-            print(STATUS);
-
-            uint8_t status = getNfrRegister(STATUS);
-            if (status & (1<<TX_DS)) {
-                setNrfRegister(STATUS, (1<<TX_DS), 1);
-            }
-
-            setNrfTransmitData(data, NRF_DATA_LENGTH);
+        if (readyBuffer != -1) {
+            int b = readyBuffer;
+            readyBuffer = -1;
+            setNrfTransmitData(buffer[b], NRF_DATA_LENGTH);
         }
-
-        listenNrf();
     }
 
     return 1;
+}
+
+uint8_t ovfCounter = 0;
+ISR(TIMER2_OVF_vect) {
+    ovfCounter++;
+    if (ovfCounter > FREQ_DEVIDER) {
+        ovfCounter = 0;
+        
+        buffer[currentBuffer][bufferCounter] = ADCH;
+
+        bufferCounter++;
+        if (bufferCounter == NRF_DATA_LENGTH) {
+            bufferCounter = 0;
+
+            readyBuffer = currentBuffer;
+            currentBuffer = (currentBuffer == 0 ? 1 : 0);
+        }
+    }
 }

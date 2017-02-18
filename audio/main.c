@@ -33,13 +33,10 @@
 #define CE_HIGH() SETBIT(CE_PORT, CE_PIN)
 
 void initPWM() {
-    // DDRB |= (1 << DDB3);
+    DDRB |= (1 << DDB3);
+
     // Fast PWM; non-inverting mode; no prescaling
-    // TCCR2 = 0b01101001;
-    // 11 - Fast PWM
-    TCCR2 |= (1<<WGM21) | (1<<WGM20);
-    // 001 - no prescaling
-    TCCR2 |= (1<<CS20);
+    TCCR2 = 0b01101001;
     
     // Enable ovf interrupt
     TIMSK |= (1<<TOIE2);
