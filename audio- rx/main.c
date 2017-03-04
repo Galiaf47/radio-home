@@ -7,8 +7,8 @@
  * Ext 0xff
  */
 
-#define F_CPU 16000000
-#define BAUD 1000000
+#define F_CPU 16000000UL
+#define BAUD 1000000UL
 
 #include <avr/io.h>
 #include <util/delay.h>
@@ -190,45 +190,76 @@ void print(uint8_t reg) {
     _delay_ms(500);
 }
 
-volatile uint8_t debugBit = 0;
-void debug() {
-    debugBit = 1;
+void printStatus() {
+    if (getNfrRegister(STATUS) == 0b00001110) {
+        SETBIT(PORTD, PD6);
+        _delay_ms(100);
+        CLEARBIT(PORTD, PD6);
+        _delay_ms(100);
+        SETBIT(PORTD, PD6);
+        _delay_ms(100);
+        CLEARBIT(PORTD, PD6);
+        _delay_ms(100);
+        SETBIT(PORTD, PD6);
+        _delay_ms(100);
+        CLEARBIT(PORTD, PD6);
+        _delay_ms(100);
+    }
 }
 
 main() {
     //Debug
     DDRD |= (1 << PD6);
     DDRB = 0xFF;
-    // PORTD |= (1 << PD0);
 
     initMSPI();
     initNrf();
     initPWM();
-    print(STATUS);
-    // initInterrupts();
+    printStatus();
 
     CE_HIGH();
     initNrfRegister(R_RX_PAYLOAD);
     sei();
     
-
-    while(1) {
-        if (debugBit == 1) {
-            debugBit = 0;
-            SETBIT(PORTD, PD6);
-            _delay_ms(100);
-            CLEARBIT(PORTD, PD6);
-            _delay_ms(100);
-        }
-    }
+    while(1) {}
 
     return 1;
 }
 
-// volatile int readyy = 0;
-// ISR(INT1_vect) {
-//     readyy = 1;
-// }
+void getData(uint8_t *data) {
+    CSN_LOW();
+    // _delay_us(SET_REGISTER_DELAY);
+    writeMSPI(R_RX_PAYLOAD);
+    // _delay_us(SET_REGISTER_DELAY);
+
+    int i;
+    for(i = 0; i < NRF_DATA_LENGTH; i++) {
+        data[i] = writeMSPI(NOP);
+        // _delay_us(SET_REGISTER_DELAY);
+    }
+
+    CSN_HIGH();
+}
+
+uint8_t getRegister(uint8_t reg) {
+    CSN_LOW();
+
+    writeMSPI(R_REGISTER | (REGISTER_MASK & reg));
+    uint8_t result = writeMSPI(NOP);
+
+    CSN_HIGH();
+
+    return result;
+}
+
+void setRegister(uint8_t reg, uint8_t value) {
+    CSN_LOW();
+
+    writeMSPI(W_REGISTER | (REGISTER_MASK & reg));
+    writeMSPI(value);
+
+    CSN_HIGH();
+}
 
 int compaCounter = 0;
 ISR(TIMER0_COMPA_vect) {
@@ -236,22 +267,25 @@ ISR(TIMER0_COMPA_vect) {
 
     if (compaCounter > READ_DEVIDER) {
         compaCounter = 0;
+        CLEARBIT(PORTD, PD6);
 
         uint8_t readBuffer = (currentBuffer == 1 ? 0 : 1);
         if (bufferState[readBuffer] == 0) {
-            CLEARBIT(TIMSK, OCIE0A);
-            sei();
-            if (getNfrRegister(STATUS) & (1<<RX_DR)) {
-                debug();
+            if ((getNfrRegister(STATUS) & (1<<RX_DR))) {
+            // if (!(getRegister(FIFO_STATUS) & (1<<RX_EMPTY))) {
+            // if (getRegister(STATUS) & (1<<RX_DR)) {
+                CLEARBIT(TIMSK, OCIE0A);
+                sei();
                 CE_LOW();
+                SETBIT(PORTD, PD6);
 
-                getNrfReceivedData(buffer[readBuffer]);
+                getData(buffer[readBuffer]);
                 bufferState[readBuffer] = 1;
+                setRegister(STATUS, (1<<RX_DR) | (1<<MAX_RT) | (1<<TX_DS));
 
                 CE_HIGH();
+                SETBIT(TIMSK, OCIE0A);
             }
-
-            SETBIT(TIMSK, OCIE0A);
         }
     }
 }
@@ -279,6 +313,7 @@ ISR(TIMER0_OVF_vect) {
             currentBuffer = (currentBuffer == 1 ? 0 : 1);
         } else {
             PORTB = OCR0B = buffer[currentBuffer][bufferCounter];
+
             bufferCounter++;
             if (bufferCounter == NRF_DATA_LENGTH) {
                 bufferCounter = 0;
