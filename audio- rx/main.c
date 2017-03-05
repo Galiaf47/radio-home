@@ -8,7 +8,7 @@
  */
 
 #define F_CPU 16000000UL
-#define BAUD 1000000UL
+#define BAUD 2000000UL
 
 #include <avr/io.h>
 #include <util/delay.h>
@@ -23,8 +23,8 @@
 #define CE_PIN PD4
 
 #define NRF_DATA_LENGTH 32
-#define SET_REGISTER_DELAY 100
-#define FREQ_DEVIDER 10
+#define SET_REGISTER_DELAY 10
+#define FREQ_DEVIDER 8
 #define READ_DEVIDER (NRF_DATA_LENGTH / 2) * FREQ_DEVIDER
 
 #define SETBIT(x, y) x |= (1 << y)
@@ -119,6 +119,17 @@ uint8_t getNfrRegister(uint8_t reg) {
     return value;
 }
 
+uint8_t getRegister(uint8_t reg) {
+    CSN_LOW();
+
+    writeMSPI(R_REGISTER | (REGISTER_MASK & reg));
+    uint8_t result = writeMSPI(NOP);
+
+    CSN_HIGH();
+
+    return result;
+}
+
 void initNrf() {
     DDRD |= (1 << CSN_PIN) | (1 << CE_PIN);
     CSN_HIGH();//CSN to high to disable nrf
@@ -137,7 +148,7 @@ void initNrf() {
     setNrfRegister(EN_RXADDR, 0x01, 1);
 
     // 5 bytes RF_Address length
-    setNrfRegister(SETUP_AW, 0x03, 1);
+    setNrfRegister(SETUP_AW, 0b11, 1);
 
     // 2.401GHz
     setNrfRegister(RF_CH, 0x01, 1);
@@ -148,14 +159,21 @@ void initNrf() {
 
     // Receiver address
     setNrfRegister(RX_ADDR_P0, 0x12, 5);
+
     // Transmitter address
     setNrfRegister(TX_ADDR, 0x12, 5);
 
     // Payload length setup
     setNrfRegister(RX_PW_P0, NRF_DATA_LENGTH, 1);
 
-    //Primary receiver (PRIM_RX = 1); Power up (PWR_UP = 1); CRC disabled (EN_CRC = 0)
-    setNrfRegister(CONFIG, 0b00010011, 1);
+    //MASK_RX_DR = 0
+    //MASK_TX_DS = 0
+    //MASK_MAX_RT = 0
+    //EN_CRC = 1
+    //CRCO = 0 (0 = 1byte; 1 = 2byte)
+    //PWR_UP = 1
+    //PRIM_RX = 1
+    setNrfRegister(CONFIG, 0b00001011, 1);
 
     _delay_ms(100);
 }
@@ -184,7 +202,7 @@ void initInterrupts() {
 }
 
 void print(uint8_t reg) {
-    PORTB = getNfrRegister(reg);
+    PORTB = getRegister(reg);
     _delay_ms(500);
     PORTB = 0;
     _delay_ms(500);
@@ -216,9 +234,10 @@ main() {
     initNrf();
     initPWM();
     printStatus();
+    print(STATUS);
 
     CE_HIGH();
-    initNrfRegister(R_RX_PAYLOAD);
+    // initNrfRegister(R_RX_PAYLOAD);
     sei();
     
     while(1) {}
@@ -228,28 +247,17 @@ main() {
 
 void getData(uint8_t *data) {
     CSN_LOW();
-    // _delay_us(SET_REGISTER_DELAY);
+    _delay_us(SET_REGISTER_DELAY);
     writeMSPI(R_RX_PAYLOAD);
-    // _delay_us(SET_REGISTER_DELAY);
+    _delay_us(SET_REGISTER_DELAY);
 
     int i;
     for(i = 0; i < NRF_DATA_LENGTH; i++) {
         data[i] = writeMSPI(NOP);
-        // _delay_us(SET_REGISTER_DELAY);
+        _delay_us(SET_REGISTER_DELAY);
     }
 
     CSN_HIGH();
-}
-
-uint8_t getRegister(uint8_t reg) {
-    CSN_LOW();
-
-    writeMSPI(R_REGISTER | (REGISTER_MASK & reg));
-    uint8_t result = writeMSPI(NOP);
-
-    CSN_HIGH();
-
-    return result;
 }
 
 void setRegister(uint8_t reg, uint8_t value) {
@@ -271,8 +279,9 @@ ISR(TIMER0_COMPA_vect) {
 
         uint8_t readBuffer = (currentBuffer == 1 ? 0 : 1);
         if (bufferState[readBuffer] == 0) {
-            if ((getNfrRegister(STATUS) & (1<<RX_DR))) {
-            // if (!(getRegister(FIFO_STATUS) & (1<<RX_EMPTY))) {
+            // if ((getNfrRegister(STATUS) & (1<<RX_DR))) {
+            if (!(getRegister(FIFO_STATUS) & (1<<RX_EMPTY))) {
+                // bufferState[readBuffer] = 0;
             // if (getRegister(STATUS) & (1<<RX_DR)) {
                 CLEARBIT(TIMSK, OCIE0A);
                 sei();
@@ -282,6 +291,7 @@ ISR(TIMER0_COMPA_vect) {
                 getData(buffer[readBuffer]);
                 bufferState[readBuffer] = 1;
                 setRegister(STATUS, (1<<RX_DR) | (1<<MAX_RT) | (1<<TX_DS));
+                // setNrfRegister(STATUS, (1<<RX_DR) | (1<<MAX_RT) | (1<<TX_DS), 1);
 
                 CE_HIGH();
                 SETBIT(TIMSK, OCIE0A);
@@ -302,6 +312,7 @@ void directPlay() {
 }
 
 uint8_t ovfCounter = 0;
+uint8_t i = 0;
 ISR(TIMER0_OVF_vect) {
     ovfCounter++;
     if (ovfCounter > FREQ_DEVIDER) {
@@ -311,8 +322,11 @@ ISR(TIMER0_OVF_vect) {
 
         if (bufferState[currentBuffer] == 0) {
             currentBuffer = (currentBuffer == 1 ? 0 : 1);
+            i++;
         } else {
-            PORTB = OCR0B = buffer[currentBuffer][bufferCounter];
+            PORTB = i;
+            i = 0;
+            /*PORTB = */OCR0B = buffer[currentBuffer][bufferCounter];
 
             bufferCounter++;
             if (bufferCounter == NRF_DATA_LENGTH) {
