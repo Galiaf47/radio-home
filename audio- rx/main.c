@@ -22,10 +22,12 @@
 #define CE_PORT PORTD
 #define CE_PIN PD4
 
+#define SAMPLE_RATE 24000
+#define TOP (10 * ((F_CPU / 10) / SAMPLE_RATE))
+
 #define NRF_DATA_LENGTH 32
 #define SET_REGISTER_DELAY 10
-#define FREQ_DEVIDER 8
-#define READ_DEVIDER (NRF_DATA_LENGTH / 2) * FREQ_DEVIDER
+#define READ_DEVIDER (NRF_DATA_LENGTH / 2)
 
 #define SETBIT(x, y) x |= (1 << y)
 #define CLEARBIT(x, y) x &= (~(1 << y))
@@ -119,6 +121,15 @@ uint8_t getNfrRegister(uint8_t reg) {
     return value;
 }
 
+void setRegister(uint8_t reg, uint8_t value) {
+    CSN_LOW();
+
+    writeMSPI(W_REGISTER | (REGISTER_MASK & reg));
+    writeMSPI(value);
+
+    CSN_HIGH();
+}
+
 uint8_t getRegister(uint8_t reg) {
     CSN_LOW();
 
@@ -128,6 +139,21 @@ uint8_t getRegister(uint8_t reg) {
     CSN_HIGH();
 
     return result;
+}
+
+void getData(uint8_t *data) {
+    CSN_LOW();
+    _delay_us(SET_REGISTER_DELAY);
+    writeMSPI(R_RX_PAYLOAD);
+    _delay_us(SET_REGISTER_DELAY);
+
+    int i;
+    for(i = 0; i < NRF_DATA_LENGTH; i++) {
+        data[i] = writeMSPI(NOP);
+        _delay_us(SET_REGISTER_DELAY);
+    }
+
+    CSN_HIGH();
 }
 
 void initNrf() {
@@ -179,26 +205,12 @@ void initNrf() {
 }
 
 void initPWM() {
-    DDRD |= (1 << PD5);
-    // (00)-OC0A pin disconected
-    // (10)-OC0B non-inverting mode (clear on match, set at TOP)
-    // (00)-reserved
-    // (11)-Fast PWM, TOP - 0xff
-    TCCR0A = 0b00100011;
-    
-    // (00)-force output disabled
-    // (00)-reserved
-    // (0)-Fast PWM, TOP - 0xff
-    // (001)-no prescaling
-    TCCR0B = 0b00000001;
-
-    // Enable OVF and COMPA interrupt
-    TIMSK |= (1<<TOIE0) | (1<<OCIE0A);
-}
-
-void initInterrupts() {
-    DDRD &= (~(1 << PD3));
-    GIMSK = (1 << INT1);
+    DDRB |= (1 << PB3) | (1 << PB4);
+    ICR1 = TOP;
+    TCCR1A = (1<<COM1A1) | (1<<COM1B0) | (1<<COM1B1);
+    TCCR1A |= (1<<WGM11);
+    TCCR1B = (1<<WGM13) | (1<<WGM12) | (1<<CS10);
+    TIMSK = (1<<ICIE1) | (1<<TOIE1);
 }
 
 void print(uint8_t reg) {
@@ -228,16 +240,16 @@ void printStatus() {
 main() {
     //Debug
     DDRD |= (1 << PD6);
-    DDRB = 0xFF;
+    // DDRB = 0xFF;
+    PORTB = 0b11100111;
 
     initMSPI();
     initNrf();
     initPWM();
     printStatus();
-    print(STATUS);
+    // print(STATUS);
 
     CE_HIGH();
-    // initNrfRegister(R_RX_PAYLOAD);
     sei();
     
     while(1) {}
@@ -245,94 +257,47 @@ main() {
     return 1;
 }
 
-void getData(uint8_t *data) {
-    CSN_LOW();
-    _delay_us(SET_REGISTER_DELAY);
-    writeMSPI(R_RX_PAYLOAD);
-    _delay_us(SET_REGISTER_DELAY);
+uint8_t readCounter = 0;
+ISR(TIMER1_CAPT_vect) {
+    readCounter++;
 
-    int i;
-    for(i = 0; i < NRF_DATA_LENGTH; i++) {
-        data[i] = writeMSPI(NOP);
-        _delay_us(SET_REGISTER_DELAY);
-    }
+    if (readCounter >= READ_DEVIDER) {
+        readCounter = 0;
 
-    CSN_HIGH();
-}
-
-void setRegister(uint8_t reg, uint8_t value) {
-    CSN_LOW();
-
-    writeMSPI(W_REGISTER | (REGISTER_MASK & reg));
-    writeMSPI(value);
-
-    CSN_HIGH();
-}
-
-int compaCounter = 0;
-ISR(TIMER0_COMPA_vect) {
-    compaCounter++;
-
-    if (compaCounter > READ_DEVIDER) {
-        compaCounter = 0;
-        CLEARBIT(PORTD, PD6);
-
-        uint8_t readBuffer = (currentBuffer == 1 ? 0 : 1);
-        if (bufferState[readBuffer] == 0) {
-            // if ((getNfrRegister(STATUS) & (1<<RX_DR))) {
+        if (bufferState[!currentBuffer] == 0) {
             if (!(getRegister(FIFO_STATUS) & (1<<RX_EMPTY))) {
-                // bufferState[readBuffer] = 0;
-            // if (getRegister(STATUS) & (1<<RX_DR)) {
-                CLEARBIT(TIMSK, OCIE0A);
+                uint8_t readBuffer = !currentBuffer;
+                TIMSK &= ~(1<<ICIE1);
                 sei();
-                CE_LOW();
-                SETBIT(PORTD, PD6);
 
+                // CE_LOW();
                 getData(buffer[readBuffer]);
                 bufferState[readBuffer] = 1;
                 setRegister(STATUS, (1<<RX_DR) | (1<<MAX_RT) | (1<<TX_DS));
-                // setNrfRegister(STATUS, (1<<RX_DR) | (1<<MAX_RT) | (1<<TX_DS), 1);
+                // CE_HIGH();
 
-                CE_HIGH();
-                SETBIT(TIMSK, OCIE0A);
+                TIMSK |= (1<<ICIE1);
             }
         }
     }
 }
 
-// no double buffering, disable all the TIMER0_COMPA_vect (OCIE0A) logic before use it
-void directPlay() {
-    if ((UCSRA & (1<<UDRE))) {
-        UDR = NOP;
-    }
-    
-    if ((UCSRA & (1<<RXC))) {
-        PORTB = OCR0B = UDR;
-    }
-}
-
-uint8_t ovfCounter = 0;
 uint8_t i = 0;
-ISR(TIMER0_OVF_vect) {
-    ovfCounter++;
-    if (ovfCounter > FREQ_DEVIDER) {
-        ovfCounter = 0;
+ISR(TIMER1_OVF_vect) {
+    if (bufferState[currentBuffer] == 0) {
+        currentBuffer = !currentBuffer;
+        i++;
+    } else {
+        // PORTB = i;
+        i = 0;
 
-        // directPlay();
+        OCR1A = OCR1B = buffer[currentBuffer][bufferCounter] << 2;
 
-        if (bufferState[currentBuffer] == 0) {
-            currentBuffer = (currentBuffer == 1 ? 0 : 1);
-            i++;
-        } else {
-            PORTB = i;
-            i = 0;
-            /*PORTB = */OCR0B = buffer[currentBuffer][bufferCounter];
-
-            bufferCounter++;
-            if (bufferCounter == NRF_DATA_LENGTH) {
-                bufferCounter = 0;
-                bufferState[currentBuffer] = 0;
-            }
+        bufferCounter++;
+        if (bufferCounter >= NRF_DATA_LENGTH) {
+            bufferCounter = 0;
+            bufferState[currentBuffer] = 0;
+            currentBuffer = !currentBuffer;
         }
     }
 }
